@@ -2,7 +2,15 @@ import axios from 'axios';
 import { type UserInfo } from './auth';
 
 // ─── Base URL ─────────────────────────────────────────────────────────────────
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:5000/api';
+// NEXT_PUBLIC_API_URL must be set in Vercel → Settings → Environment Variables.
+// Fallback to localhost ONLY in development so a missing var is obvious in prod.
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL;
+if (!BASE_URL) {
+  throw new Error(
+    '[api.ts] NEXT_PUBLIC_API_URL is not set. ' +
+    'Add it in Vercel → Project Settings → Environment Variables.'
+  );
+}
 
 const api = axios.create({
   baseURL: BASE_URL,

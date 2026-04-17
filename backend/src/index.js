@@ -138,3 +138,12 @@ const shutdown = (signal) => {
 };
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
+
+// ─── Safety net for unhandled async errors ────────────────────────────────────
+// Catches any promise rejection that escapes try/catch blocks.
+// Logs the reason and closes the server cleanly before exiting,
+// so Render sees a non-zero exit code and restarts the service.
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled promise rejection:', reason);
+  server.close(() => process.exit(1));
+});
