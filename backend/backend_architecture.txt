@@ -1,0 +1,881 @@
+================================================================================
+  REDTHREAD — BACKEND ARCHITECTURE
+  A comprehensive technical reference for the Node.js / Express.js API
+================================================================================
+
+Last updated : 2026-04-17
+File         : backend/backend_architecture.txt
+Covers       : src/index.js · routes/ · controllers/ · models/ · middleware/ · utils/
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+
+  1.  Role of Node.js and Express.js
+  2.  Folder Structure
+        2a. routes/
+        2b. controllers/
+        2c. models/
+        2d. middleware/
+        2e. utils/
+        2f. config/
+  3.  Request Lifecycle
+        request → middleware stack → controller → database → response
+  4.  Deep Dive: Validation (express-validator)
+  5.  Deep Dive: Authentication Middleware (JWT + httpOnly Cookies)
+  6.  Deep Dive: Error Handling System
+  7.  Security Layers (bonus: full picture)
+  8.  API Route Map
+
+================================================================================
+1. ROLE OF NODE.JS AND EXPRESS.JS
+================================================================================
+
+NODE.JS
+-------
+Node.js is the JavaScript runtime that powers the RedThread server. It runs on
+the V8 engine (same as Chrome) and uses a non-blocking, event-driven I/O model.
+
+Why this matters for RedThread:
+  - Handles many concurrent HTTP requests efficiently without spawning threads
+    for each one (important for real-time graph data fetches).
+  - Shares the JavaScript language with the Next.js frontend — types, patterns,
+    and utility logic are conceptually familiar across the stack.
+  - npm ecosystem gives us best-in-class packages: mongoose, jsonwebtoken,
+    express-validator, bcryptjs, helmet, etc.
+
+Key requirement enforced in package.json:
+  "engines": { "node": ">=18.0.0" }
+
+This pins us to Node 18 LTS+ for stable fetch(), updated security patches, and
+consistent behaviour across local dev ↔ Render.com production.
+
+EXPRESS.JS
+----------
+Express is a minimal, unopinionated HTTP framework layered on top of Node's
+built-in `http` module. It provides:
+
+  1. Routing         — match HTTP method + URL path to a handler function
+  2. Middleware      — run functions in sequence on every request (or per-route)
+  3. Request/Response helpers — req.body, req.params, res.json(), res.status()
+  4. Error handling  — a 4-argument (err, req, res, next) convention for
+                       centralised error management
+
+Express itself has no database, authentication, or validation opinion — we layer
+those on top using packages and our own modules.
+
+The RedThread app is created in a single line:
+  const app = express();
+
+Every feature (CORS, body parsing, routes, error handling) is plugged in with
+  app.use(...)
+
+The server listens on PORT (default 5000):
+  const server = app.listen(PORT, () => { ... });
+
+================================================================================
+2. FOLDER STRUCTURE
+================================================================================
+
+backend/
+├── package.json          ← dependencies, npm scripts (start, dev, seed)
+├── .env                  ← secrets (MONGO_URI, JWT_SECRET, etc.) — git-ignored
+├── .env.example          ← safe template committed to git
+├── seed.js               ← one-off database seeding script
+├── test-validation.js    ← manual validation smoke tests
+└── src/
+    ├── index.js          ← entry point: wires everything together
+    ├── config/
+    │   └── db.js         ← Mongoose connection helper
+    ├── routes/           ← URL definitions only (thin layer)
+    │   ├── authRoutes.js
+    │   ├── nodeRoutes.js
+    │   └── threadRoutes.js
+    ├── controllers/      ← business logic (what happens per request)
+    │   ├── authController.js
+    │   ├── nodeController.js
+    │   └── threadController.js
+    ├── models/           ← MongoDB schemas + data behaviour
+    │   ├── User.js
+    │   ├── ConspiracyNode.js
+    │   └── RedThread.js
+    ├── middleware/       ← reusable request processing functions
+    │   ├── authMiddleware.js   ← JWT verification, attaches req.user
+    │   ├── validate.js         ← reads express-validator results → AppError
+    │   ├── validationRules.js  ← all body/param rule sets
+    │   └── errorMiddleware.js  ← global error handler (last middleware)
+    └── utils/
+        ├── AppError.js         ← custom operational error class
+        └── asyncHandler.js     ← eliminates try/catch in every controller
+
+--------------------------------------------------------------------------------
+2a. routes/
+--------------------------------------------------------------------------------
+
+Routes are the URL contract of the API. They answer one question:
+  "Which controller function handles THIS method + path?"
+
+Routes in RedThread are intentionally thin — no logic lives here. They only:
+  - Define the URL pattern and HTTP verb
+  - Attach middleware chains (in order) before the controller
+  - Import and protect with `protect` middleware where needed
+
+EXAMPLE — threadRoutes.js:
+
+  router.use(protect);           // ALL thread routes require authentication
+
+  router.get(
+    '/node/:nodeId',
+    mongoIdParam('nodeId'),      // validate :nodeId is a MongoDB ObjectId
+    validate,                    // check validation result → 400 if invalid
+    getThreadsByNode             // controller function
+  );
+
+  router
+    .route('/')
+    .get(getThreads)
+    .post(createThreadRules, validate, createThread);
+
+  router
+    .route('/:id')
+    .get(mongoIdParam('id'), validate, getThread)
+    .put(mongoIdParam('id'), updateThreadRules, validate, updateThread)
+    .delete(mongoIdParam('id'), validate, deleteThread);
+
+The `/node/:nodeId` route is declared BEFORE `/:id` deliberately. Express
+matches routes top-to-bottom, and without this order, `GET /threads/node/abc`
+would be caught by `/:id` first, interpreting "node" as the ID — a bug.
+
+Routes are mounted in index.js:
+  app.use('/api/auth',    authRoutes);
+  app.use('/api/nodes',   nodeRoutes);
+  app.use('/api/threads', threadRoutes);
+
+--------------------------------------------------------------------------------
+2b. controllers/
+--------------------------------------------------------------------------------
+
+Controllers contain the business logic for each route. They:
+  - Read data from req.body, req.params, req.query, req.user
+  - Interact with Mongoose models (database operations)
+  - Send a structured JSON response
+  - Delegate errors to next(new AppError(...)) rather than crashing
+
+Every controller is wrapped in asyncHandler() — this means any thrown error or
+rejected Promise is automatically caught and forwarded to the global error
+handler without needing try/catch.
+
+EXAMPLE — createThread in threadController.js:
+
+  const createThread = asyncHandler(async (req, res, next) => {
+    const { fromNode, toNode, type, description } = req.body;
+
+    // Business rule: a thread cannot link a node to itself
+    if (fromNode === toNode) {
+      return next(new AppError('fromNode and toNode must be different nodes', 400));
+    }
+
+    // Verify both nodes exist before creating the link
+    const [from, to] = await Promise.all([
+      ConspiracyNode.findById(fromNode),
+      ConspiracyNode.findById(toNode),
+    ]);
+    if (!from) return next(new AppError(`fromNode not found: '${fromNode}'`, 404));
+    if (!to)   return next(new AppError(`toNode not found: '${toNode}'`, 404));
+
+    const thread = await RedThread.create({
+      fromNode, toNode, type,
+      description: description || '',
+      createdBy: req.user._id,    // ← injected by authMiddleware.protect
+    });
+
+    const populated = await populateThread(RedThread.findById(thread._id));
+    res.status(201).json({ success: true, data: populated });
+  });
+
+Notice:
+  - req.user._id comes from the JWT middleware — the controller trusts it.
+  - Promise.all() fetches both nodes in parallel (not sequentially).
+  - Ownership is established at creation time via req.user._id.
+
+OWNER-ONLY PROTECTION in updateThread / deleteThread:
+
+  if (thread.createdBy.toString() !== req.user._id.toString()) {
+    return next(new AppError('Not authorized to update this thread', 403));
+  }
+
+Mongoose ObjectIds are objects, not strings — .toString() is required for
+strict equality comparison.
+
+POPULATE HELPER — resolves ObjectId references to readable data:
+
+  const populateThread = (query) =>
+    query
+      .populate('fromNode', 'title')       // replace ObjectId → { _id, title }
+      .populate('toNode',   'title')
+      .populate('createdBy', 'username email');
+
+This runs on every read so the frontend graph gets human-readable names
+instead of raw MongoDB ObjectIds.
+
+--------------------------------------------------------------------------------
+2c. models/
+--------------------------------------------------------------------------------
+
+Models define the shape of data stored in MongoDB. RedThread uses Mongoose,
+which adds schema validation, middleware hooks (pre-save), and query helpers
+on top of raw MongoDB.
+
+USER MODEL (User.js)
+  Fields:
+    - username  String, unique, 3–30 chars, alphanumeric+underscore
+    - email     String, unique, lowercase, regex-validated
+    - password  String, select: false  ← NEVER returned in queries by default
+
+  Pre-save hook (password hashing):
+    userSchema.pre('save', async function (next) {
+      if (!this.isModified('password')) return next();  // skip if not changed
+      const salt = await bcrypt.genSalt(12);
+      this.password = await bcrypt.hash(this.password, salt);
+      next();
+    });
+
+  Instance method (password comparison):
+    userSchema.methods.matchPassword = async function (enteredPassword) {
+      return bcrypt.compare(enteredPassword, this.password);
+    };
+
+  Why select: false on password?
+    User.findById(id) will NEVER include the password field in results.
+    The login controller must explicitly opt-in: .select('+password').
+    This makes it impossible to accidentally leak the hash.
+
+CONSPIRACYNODE MODEL (ConspiracyNode.js)
+  Represents a single entity on the knowledge graph (person, event, concept).
+  Fields:
+    - title       String, required, max 120 chars
+    - description String, required
+    - tags        [String], default []
+    - createdBy   ObjectId → User (required)
+    - createdAt   auto (timestamps: true)
+    - updatedAt   auto (timestamps: true)
+
+  Indexes for performance:
+    { title: 1 }                     → fast title-based filtering
+    { tags: 1 }                      → fast tag filtering
+    { createdBy: 1, createdAt: -1 }  → dashboard: "my nodes, newest first"
+    { title: 'text', description: 'text' }  → full-text search (future)
+
+REDTHREAD MODEL (RedThread.js)
+  Represents a directed edge in the conspiracy knowledge graph.
+  Fields:
+    - fromNode    ObjectId → ConspiracyNode (required)
+    - toNode      ObjectId → ConspiracyNode (required)
+    - type        Enum: 'influence' | 'similarity' | 'cause' (required)
+    - description String, optional, max 2000 chars
+    - createdBy   ObjectId → User (required)
+    - createdAt / updatedAt auto
+
+  Indexes:
+    { fromNode: 1 }           → fast "all edges FROM node X"
+    { toNode: 1 }             → fast "all edges TO node X"
+    { fromNode: 1, toNode: 1} → compound: cascade deletes + adjacency queries
+    { createdBy: 1 }          → "all threads created by user X"
+
+  The three thread types shape the visual graph:
+    - influence  : X directly influenced Y
+    - similarity : X and Y share surprising traits
+    - cause      : X is a proposed cause of Y
+
+--------------------------------------------------------------------------------
+2d. middleware/
+--------------------------------------------------------------------------------
+
+Middleware are functions with the signature: (req, res, next) => void
+They run in sequence before the controller, modifying or validating the request.
+
+Four custom middleware files:
+
+  authMiddleware.js   — JWT verification
+  validate.js         — express-validator result checker
+  validationRules.js  — per-resource rule sets
+  errorMiddleware.js  — global error handler
+
+See Sections 4, 5, and 6 for deep dives.
+
+Global middleware applied to every request (in index.js):
+
+  app.use(helmet())          — security headers (CSP, HSTS, X-DNS-Prefetch, etc.)
+  app.use(cors({...}))       — allow requests from trusted origins with cookies
+  app.use(apiLimiter)        — 100 req / 15 min per IP
+  app.use(express.json())    — parse JSON body (max 10kb to prevent DoS)
+  app.use(cookieParser())    — parse Cookie header → req.cookies
+  app.use(mongoSanitize())   — strip MongoDB operator keys ($, .) from input
+
+--------------------------------------------------------------------------------
+2e. utils/
+--------------------------------------------------------------------------------
+
+APPERROR.JS
+  A custom Error subclass used throughout the app for known, operational errors.
+
+  class AppError extends Error {
+    constructor(message, statusCode) {
+      super(message);
+      this.statusCode = statusCode;
+      this.status = String(statusCode).startsWith('4') ? 'fail' : 'error';
+      this.isOperational = true;   ← key flag used by the error handler
+      Error.captureStackTrace(this, this.constructor);
+    }
+  }
+
+  isOperational = true means: "this is an expected error (bad input, not found,
+  unauthorized). It is safe to send the message to the client."
+  Programming errors (bugs, null reference crashes) do NOT have isOperational,
+  so the global handler sends a generic "Something went wrong" in production.
+
+ASYNCHANDLER.JS
+  Wraps any async controller function so rejected Promises automatically
+  flow to Express's error handling pipeline.
+
+  const asyncHandler = (fn) => (req, res, next) =>
+    Promise.resolve(fn(req, res, next)).catch(next);
+
+  Without this, every controller would need:
+    try { ... } catch (err) { next(err); }
+
+  With asyncHandler, controllers have no try/catch at all — errors bubble up
+  cleanly to globalErrorHandler.
+
+--------------------------------------------------------------------------------
+2f. config/
+--------------------------------------------------------------------------------
+
+db.js contains the MongoDB connection logic using Mongoose.
+It is called once at startup in index.js:
+
+  connectDB();
+
+Environment variables are validated before the app starts:
+
+  const REQUIRED_ENV = ['MONGO_URI', 'JWT_SECRET'];
+  const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
+  if (missing.length) {
+    console.error(`❌ Missing required environment variables: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+
+This prevents the server from starting with a broken config — failing fast
+is better than mysterious runtime errors 10 minutes after boot.
+
+================================================================================
+3. REQUEST LIFECYCLE
+================================================================================
+
+Every API call travels through the following pipeline:
+
+  CLIENT
+    │
+    ▼
+  ┌─────────────────────────────────────────────┐
+  │  GLOBAL MIDDLEWARE (applied to all routes)  │
+  │                                             │
+  │  helmet()          → set security headers   │
+  │  cors()            → validate origin        │
+  │  rateLimit()       → check req/min cap      │
+  │  express.json()    → parse req.body         │
+  │  cookieParser()    → parse req.cookies      │
+  │  mongoSanitize()   → strip $, . from input  │
+  └─────────────────────────────────────────────┘
+    │
+    ▼
+  ┌─────────────────────────────────────────────┐
+  │  ROUTER (matches method + URL)              │
+  │                                             │
+  │  e.g. POST /api/threads → threadRoutes.js   │
+  └─────────────────────────────────────────────┘
+    │
+    ▼
+  ┌─────────────────────────────────────────────┐
+  │  ROUTE-LEVEL MIDDLEWARE                     │
+  │                                             │
+  │  1. protect (authMiddleware)                │
+  │     - reads cookie / Authorization header   │
+  │     - verifies JWT signature + expiry       │
+  │     - attaches req.user = { _id, username } │
+  │                                             │
+  │  2. validationRules (express-validator)     │
+  │     - runs body() / param() rule chains     │
+  │     - marks errors in req (no response yet) │
+  │                                             │
+  │  3. validate (validate.js)                  │
+  │     - checks validationResult(req)          │
+  │     - if errors: next(new AppError(400))    │
+  │     - if clean: calls next() → controller  │
+  └─────────────────────────────────────────────┘
+    │
+    ▼
+  ┌─────────────────────────────────────────────┐
+  │  CONTROLLER (business logic)                │
+  │                                             │
+  │  wrapped in asyncHandler() — no try/catch   │
+  │                                             │
+  │  - reads req.body / req.params / req.user   │
+  │  - calls Mongoose model methods             │
+  │  - on error: next(new AppError(...))        │
+  │  - on success: res.json({ success, data })  │
+  └─────────────────────────────────────────────┘
+    │
+    ▼
+  ┌─────────────────────────────────────────────┐
+  │  DATABASE (MongoDB via Mongoose)            │
+  │                                             │
+  │  Model.create() / .find() / .findById()     │
+  │  .save() / .deleteOne()                     │
+  │  .populate() resolves ObjectId references   │
+  └─────────────────────────────────────────────┘
+    │
+    ▼
+  ┌─────────────────────────────────────────────┐
+  │  RESPONSE                                   │
+  │                                             │
+  │  res.status(200/201).json({                 │
+  │    success: true,                           │
+  │    data:    { ... }                         │
+  │  })                                         │
+  └─────────────────────────────────────────────┘
+    │
+    ▼ (only if error occurred anywhere above)
+  ┌─────────────────────────────────────────────┐
+  │  GLOBAL ERROR HANDLER (errorMiddleware.js)  │
+  │                                             │
+  │  - normalises Mongoose / JWT errors         │
+  │  - dev: returns stack trace                 │
+  │  - prod: returns clean message only         │
+  └─────────────────────────────────────────────┘
+    │
+    ▼
+  CLIENT
+
+CONCRETE EXAMPLE — POST /api/threads
+
+  1. Request arrives: POST /api/threads
+     Body: { "fromNode": "abc123", "toNode": "def456", "type": "cause" }
+     Cookie: redthread_token=<jwt>
+
+  2. Global middleware passes (headers set, body parsed, cookie parsed)
+
+  3. threadRoutes.js matches POST /
+     Middleware chain: [protect, createThreadRules, validate, createThread]
+
+  4. protect runs:
+     - Reads req.cookies.redthread_token
+     - jwt.verify(token, JWT_SECRET) → decoded = { id: "userId123" }
+     - User.findById("userId123").select('-password')
+     - req.user = { _id, username, email }
+     - next()
+
+  5. createThreadRules runs:
+     - body('fromNode').isMongoId() → checks "abc123" — FAILS (not a valid ObjectId)
+     - Error is stored in req (not sent yet)
+
+  6. validate runs:
+     - validationResult(req) finds the error
+     - next(new AppError('fromNode must be a valid MongoDB ObjectId', 400))
+     - createThread is NEVER called
+
+  7. globalErrorHandler receives the 400 AppError
+     - isOperational = true → safe to expose message
+     - res.status(400).json({ success: false, message: "fromNode must be a valid MongoDB ObjectId" })
+
+================================================================================
+4. DEEP DIVE: VALIDATION (express-validator)
+================================================================================
+
+express-validator wraps the popular `validator.js` library and integrates it
+directly into the Express middleware chain.
+
+HOW IT WORKS IN THREE STEPS:
+
+  Step 1 — Declare rules (validationRules.js)
+    Arrays of body() / param() chains that describe what is acceptable.
+    These functions do NOT throw — they annotate req with results.
+
+  Step 2 — Include rules in the route
+    router.post('/', createThreadRules, validate, createThread)
+    Express runs each item in the array as middleware in order.
+
+  Step 3 — Check results (validate.js)
+    const validate = (req, _res, next) => {
+      const errors = validationResult(req);
+      if (errors.isEmpty()) return next();
+      const messages = errors.array().map((e) => e.msg);
+      return next(new AppError(messages.join('. '), 400));
+    };
+
+RULE SETS IN REDTHREAD:
+
+  registerRules — POST /api/auth/register
+    body('username')
+      .trim()
+      .notEmpty()  → 'Username is required'
+      .isLength({ min: 3 }) → 'Username must be at least 3 characters'
+      .isLength({ max: 30 }) → 'Username must not exceed 30 characters'
+      .isAlphanumeric('en-US', { ignore: '_-' })
+        → 'Username may only contain letters, numbers, underscores and hyphens'
+
+    body('email')
+      .trim().notEmpty().isEmail().normalizeEmail()
+
+    body('password')
+      .notEmpty().isLength({ min: 6 }).isLength({ max: 128 })
+
+  createThreadRules — POST /api/threads
+    body('fromNode').notEmpty().isMongoId()
+    body('toNode').notEmpty().isMongoId()
+    body('type').notEmpty().isIn(['influence', 'similarity', 'cause'])
+    body('description').optional().isString().isLength({ max: 2000 }).trim()
+
+    // Unknown field guard — rejects surprise keys like "admin: true"
+    body().custom((body) => {
+      const allowed = new Set(['fromNode', 'toNode', 'type', 'description']);
+      const unknown = Object.keys(body).filter((k) => !allowed.has(k));
+      if (unknown.length) throw new Error(`Unknown field(s): ${unknown.join(', ')}`);
+      return true;
+    });
+
+  mongoIdParam — reusable URL parameter validator
+    const mongoIdParam = (paramName) => [
+      param(paramName).isMongoId()
+        .withMessage(`${paramName} must be a valid MongoDB ObjectId`),
+    ];
+
+    Used on every route with a URL parameter to prevent Mongoose CastErrors:
+      router.get('/:id', mongoIdParam('id'), validate, getThread)
+
+WHY NOT .escape()?
+  The validation rules deliberately do NOT use .escape() (HTML encoding).
+  Because React renders text as plain DOM text nodes (not innerHTML), it already
+  prevents XSS. Using .escape() would cause double-encoding:
+    Input:  "Oswald & Ruby"
+    After .escape() stored in DB: "Oswald &amp; Ruby"
+    React renders: "Oswald &amp; Ruby" (literal — broken display)
+
+  Protection is instead provided by:
+    - express-mongo-sanitize (strips MongoDB operators)
+    - Mongoose schema maxlength limits
+    - React's inherent XSS safety at render time
+
+================================================================================
+5. DEEP DIVE: AUTHENTICATION MIDDLEWARE (JWT)
+================================================================================
+
+RedThread uses JSON Web Tokens (JWT) for stateless authentication, delivered
+via httpOnly cookies rather than localStorage.
+
+WHY HTTONLY COOKIES (not localStorage)?
+  localStorage is accessible from JavaScript → vulnerable to XSS attacks.
+  httpOnly cookies cannot be read by any JavaScript on the page — only the
+  browser sends them automatically with every request to the same origin.
+  This is the modern, secure default for web authentication.
+
+TOKEN GENERATION — authController.js:
+
+  const generateToken = (id) =>
+    jwt.sign({ id }, process.env.JWT_SECRET, {
+      expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    });
+
+  The JWT payload contains only the user's MongoDB _id.
+  The secret (JWT_SECRET) is kept in .env — never committed to git.
+
+SETTING THE COOKIE — sendAuthResponse():
+
+  const COOKIE_OPTIONS = {
+    httpOnly: true,                      // inaccessible to client JS
+    secure:   IS_PROD,                   // HTTPS only in production
+    sameSite: IS_PROD ? 'none' : 'lax', // 'none' required for cross-origin (Vercel → Render)
+    maxAge:   7 * 24 * 60 * 60 * 1000,  // 7 days in milliseconds
+  };
+
+  res.cookie('redthread_token', token, COOKIE_OPTIONS);
+
+  The token is set in the cookie — NOT returned in the response body.
+  This is enforced by convention: the JSON body contains only user info.
+
+  Cross-origin note: The frontend lives on Vercel (external domain), the API on
+  Render. sameSite: 'none' + secure: true is required for browsers to send
+  cookies across different origins. This is why both must be set together.
+
+VERIFYING THE TOKEN — authMiddleware.js (the protect function):
+
+  const protect = asyncHandler(async (req, _res, next) => {
+    let token;
+
+    // Priority 1: httpOnly cookie (browser clients)
+    if (req.cookies && req.cookies.redthread_token) {
+      token = req.cookies.redthread_token;
+    }
+
+    // Priority 2: Authorization header (API clients / Postman / curl)
+    if (!token && req.headers.authorization?.startsWith('Bearer ')) {
+      token = req.headers.authorization.split(' ')[1];
+    }
+
+    if (!token) {
+      return next(new AppError('Not authorized — no token provided', 401));
+    }
+
+    // Throws JsonWebTokenError or TokenExpiredError on failure
+    // — both are caught by asyncHandler and handled by globalErrorHandler
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Database lookup to confirm user still exists
+    const user = await User.findById(decoded.id).select('-password');
+    if (!user) {
+      return next(new AppError('Not authorized — user account no longer exists', 401));
+    }
+
+    req.user = user;  // attach full user object to request
+    next();
+  });
+
+LOGOUT — clearing the cookie:
+
+  res.clearCookie('redthread_token', {
+    httpOnly: true,
+    secure:   IS_PROD,
+    sameSite: 'strict',
+  });
+  res.json({ success: true, message: 'Logged out successfully' });
+
+  There is no server-side session to invalidate — the JWT is stateless.
+  Clearing the cookie effectively logs the user out because the browser will
+  no longer include it in subsequent requests.
+
+TOKEN EXPIRY ERRORS:
+  If the JWT is expired, jwt.verify() throws a TokenExpiredError.
+  asyncHandler catches it → globalErrorHandler intercepts it and converts it to:
+  { success: false, message: 'Your session has expired — please log in again.' }
+
+AUTH FLOW SUMMARY:
+
+  Register / Login
+    └─ POST /api/auth/register or /api/auth/login
+       └─ validation rules → validate → authController
+          └─ on success: jwt.sign() → res.cookie('redthread_token', ...)
+             └─ 201/200 JSON: { success, data: { _id, username, email } }
+
+  Authenticated request (e.g., creating a node)
+    └─ POST /api/nodes  (Cookie: redthread_token=<jwt> sent automatically)
+       └─ protect middleware
+          └─ jwt.verify() → User.findById() → req.user = user
+             └─ controller runs with req.user available
+
+  GET /api/auth/me (check current session)
+    └─ protect → reads req.user (already attached) → returns user data
+
+================================================================================
+6. DEEP DIVE: ERROR HANDLING SYSTEM
+================================================================================
+
+RedThread has a unified, centralised error handling architecture. Errors are
+never handled ad-hoc in individual controllers — they always flow to one place.
+
+THE THREE-PART SYSTEM:
+
+  AppError (utils/AppError.js)
+    → The standardised error type for all known errors
+
+  asyncHandler (utils/asyncHandler.js)
+    → Ensures async errors reach the global handler without try/catch
+
+  globalErrorHandler (middleware/errorMiddleware.js)
+    → The single exit point for ALL errors in the application
+
+─────────────────────────────────────────────────────────────────────────────
+PART 1: AppError
+─────────────────────────────────────────────────────────────────────────────
+
+  throw new AppError('Thread not found', 404)
+  ↑ statusCode: 404
+  ↑ isOperational: true  (predefined, expected, safe to expose)
+
+  Usage in controllers:
+    if (!thread) return next(new AppError('Thread not found', 404));
+    if (noPermission) return next(new AppError('Not authorized', 403));
+    if (selfLink) return next(new AppError('fromNode and toNode must differ', 400));
+
+─────────────────────────────────────────────────────────────────────────────
+PART 2: asyncHandler
+─────────────────────────────────────────────────────────────────────────────
+
+  Without asyncHandler (verbose + error-prone):
+    const getThread = async (req, res, next) => {
+      try {
+        const thread = await RedThread.findById(req.params.id);
+        res.json({ success: true, data: thread });
+      } catch (err) {
+        next(err);  // ← easy to forget
+      }
+    };
+
+  With asyncHandler (clean + safe):
+    const getThread = asyncHandler(async (req, res, next) => {
+      const thread = await RedThread.findById(req.params.id);
+      res.json({ success: true, data: thread });
+    });
+
+  If RedThread.findById() rejects (e.g. DB disconnect), the Promise rejection
+  is caught by asyncHandler and passed to next(err) automatically.
+
+─────────────────────────────────────────────────────────────────────────────
+PART 3: globalErrorHandler
+─────────────────────────────────────────────────────────────────────────────
+
+  Registered as the LAST middleware in index.js:
+    app.use(globalErrorHandler);
+
+  It performs three jobs in order:
+
+  JOB 1 — Normalise third-party errors into AppErrors:
+
+    if (error.name === 'CastError')       → handleCastError()
+    if (error.code === 11000)             → handleDuplicateKeyError()
+    if (error.name === 'ValidationError') → handleValidationError()
+    if (error.name === 'JsonWebTokenError') → handleJWTError()
+    if (error.name === 'TokenExpiredError') → handleJWTExpiredError()
+
+    Examples:
+      GET /api/nodes/not-a-valid-id
+        → Mongoose CastError → AppError('Invalid _id: not-a-valid-id...', 400)
+
+      POST /api/auth/register with existing email
+        → MongoDB code 11000 → AppError("'user@email.com' is already in use...", 400)
+
+      Expired cookie sent
+        → TokenExpiredError → AppError('Your session has expired...', 401)
+
+  JOB 2 — Development mode: send full details
+
+    sendDevError() returns:
+      { success: false, message: '...', stack: '...' }
+    Stack trace is logged to console + sent in response body.
+    Extremely useful for debugging — never appears in production.
+
+  JOB 3 — Production mode: send safe response
+
+    sendProdError():
+      if isOperational → send { success: false, message: err.message }
+      if NOT operational (unknown bug) →
+        console.error(err)   ← log internally for monitoring
+        res.json({ success: false, message: 'Something went wrong.' })
+
+  This guarantees: stack traces, SQL queries, internal paths, variable names
+  NEVER reach the client in production, regardless of what type of error occurs.
+
+ERROR RESPONSE FORMAT (always consistent):
+
+  SUCCESS:  { "success": true,  "data": { ... } }
+  ERROR:    { "success": false, "message": "Human-readable explanation." }
+
+  The frontend can reliably check response.success to branch its UI logic.
+
+404 HANDLER (registered before globalErrorHandler):
+
+  app.use((req, _res, next) => {
+    next(new AppError(`Route not found: ${req.originalUrl}`, 404));
+  });
+
+  Any request that doesn't match a route falls through to this handler,
+  which creates a 404 AppError and passes it to globalErrorHandler.
+
+================================================================================
+7. SECURITY LAYERS
+================================================================================
+
+RedThread has defence-in-depth — multiple independent security layers:
+
+  Layer 1 — Helmet
+    Sets HTTP security headers automatically:
+    Content-Security-Policy, X-Frame-Options, HSTS, X-Content-Type-Options,
+    X-DNS-Prefetch-Control, Referrer-Policy, etc.
+
+  Layer 2 — CORS
+    Explicit allowlist of permitted origins (CLIENT_ORIGIN env var).
+    credentials: true required for cookie-bearing cross-origin requests.
+    Non-browser clients (no Origin header) are allowed through.
+
+  Layer 3 — Rate Limiting
+    apiLimiter:   100 requests / 15 min per IP (all /api/ routes)
+    authLimiter:  10 requests / 15 min per IP (/api/auth/login + /register)
+    Auth limit hits are logged with console.warn for monitoring.
+    Localhost is exempt in development (skip: req.ip === '::1').
+
+  Layer 4 — Body Size Limit
+    express.json({ limit: '10kb' })
+    Prevents oversized payload DoS attacks.
+
+  Layer 5 — NoSQL Injection Sanitization
+    express-mongo-sanitize strips keys containing '$' or '.' from:
+      req.body / req.params / req.query
+    Prevents: { "email": { "$gt": "" } } from bypassing auth.
+    Replaced with '_', and warnings are logged when triggered.
+
+  Layer 6 — Input Validation (express-validator)
+    All user input is validated before reaching any controller.
+    Unknown fields are rejected (unknown field guard in custom validators).
+
+  Layer 7 — JWT Authentication
+    Stateless session via signed JWT in httpOnly cookie.
+    No session store required — scales horizontally.
+
+  Layer 8 — Password Hashing
+    bcrypt with 12 salt rounds — computationally expensive to brute-force.
+    select: false on the password field prevents accidental exposure.
+
+  Layer 9 — Owner-only Mutation
+    Controllers verify req.user._id === resource.createdBy before allowing
+    PUT or DELETE operations. A logged-in user cannot modify another user's data.
+
+  Layer 10 — Environment Validation at Boot
+    Missing MONGO_URI or JWT_SECRET → process.exit(1)
+    Prevents the server from running in a broken-security state.
+
+================================================================================
+8. API ROUTE MAP
+================================================================================
+
+All routes are prefixed with /api
+
+AUTH ROUTES  (public unless noted)
+  POST   /api/auth/register      → register a new user
+  POST   /api/auth/login         → authenticate + set httpOnly cookie
+  POST   /api/auth/logout        → clear httpOnly cookie
+  GET    /api/auth/me            → [protected] get current user info
+
+NODE ROUTES  (all protected)
+  GET    /api/nodes              → get all conspiracy nodes (paginated)
+  POST   /api/nodes              → create a new node
+  GET    /api/nodes/:id          → get a single node by ID
+  PUT    /api/nodes/:id          → update a node (owner only)
+  DELETE /api/nodes/:id          → delete a node + its threads (owner only)
+
+THREAD ROUTES  (all protected)
+  GET    /api/threads            → get all red threads (paginated, default 200)
+  POST   /api/threads            → create a new thread (link two nodes)
+  GET    /api/threads/node/:nodeId  → get all threads connected to a node
+  GET    /api/threads/:id        → get a single thread by ID
+  PUT    /api/threads/:id        → update thread type/desc (owner only)
+  DELETE /api/threads/:id        → delete a thread (owner only)
+
+UTILITY
+  GET    /api/health             → { success, status: 'OK', env }
+
+RESPONSE ENVELOPE (consistent across all endpoints):
+  Success: { "success": true,  "count": N, "total": N, "data": [...] }
+  Error:   { "success": false, "message": "Explanation" }
+
+================================================================================
+END OF DOCUMENT
+================================================================================

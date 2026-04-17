@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Dark background base — supplement Tailwind class on body */
+body {
+  background-color: #111827; /* gray-900 */
+  color: #f3f4f6;             /* gray-100 */
+}
+
+/* Consistent scrollbar in dark mode */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1f2937;
+}
+::-webkit-scrollbar-thumb {
+  background: #374151;
+  border-radius: 3px;
+}
