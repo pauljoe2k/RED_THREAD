@@ -37,15 +37,14 @@ connectDB();
 // ─── App ──────────────────────────────────────────────────────────────────────
 const app = express();
 
-// ─── Security headers (Helmet) ────────────────────────────────────────────────
-// Disables x-powered-by, sets CSP, HSTS, etc.
-app.use(helmet());
-
-// ─── CORS ─────────────────────────────────────────────────────────────────────
-// Always allow localhost for local development.
+// ─── CORS (MUST be before Helmet and all other middleware) ───────────────────
+// CORS must run first so that preflight OPTIONS requests receive the correct
+// Access-Control-Allow-Origin header before Helmet or any other middleware
+// can block or alter the response.
+//
 // CLIENT_ORIGIN is a comma-separated list of production frontend URLs
 // e.g. "https://red-thread-kappa.vercel.app"
-// Both sets are merged so the same backend works in every environment.
+// localhost:3000 is always included for local development.
 const allowedOrigins = [
   'http://localhost:3000',
   ...( process.env.CLIENT_ORIGIN
@@ -56,18 +55,29 @@ const allowedOrigins = [
 
 console.log('Allowed CORS origins:', allowedOrigins);
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow server-to-server / curl requests (no Origin header)
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      console.warn(`CORS blocked: ${origin}`);
-      callback(new Error(`CORS: origin '${origin}' is not allowed`));
-    },
-    credentials: true, // required for httpOnly cookie to be sent cross-origin
-  })
-);
+const corsMiddleware = cors({
+  origin: (origin, callback) => {
+    // Allow server-to-server / curl / Render health-check requests (no Origin header)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.warn(`CORS blocked: ${origin}`);
+    callback(new Error(`CORS: origin '${origin}' is not allowed`));
+  },
+  credentials: true, // required for httpOnly JWT cookie to be sent cross-origin
+});
+
+// Apply CORS to all routes
+app.use(corsMiddleware);
+
+// Explicitly handle preflight OPTIONS requests for every route.
+// Without this, OPTIONS hits the rate limiter and returns 429 before
+// the CORS headers are written, which browsers report as a CORS error.
+app.options('*', corsMiddleware);
+
+// ─── Security headers (Helmet) ────────────────────────────────────────────────
+// Applied after CORS so Helmet's crossOriginResourcePolicy does not
+// interfere with the CORS preflight response.
+app.use(helmet());
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
 // General API limit: 100 req / 15 min per IP
