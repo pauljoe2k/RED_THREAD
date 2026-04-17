@@ -42,18 +42,30 @@ const app = express();
 app.use(helmet());
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
-const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:3000')
-  .split(',')
-  .map((o) => o.trim());
+// Always allow localhost for local development.
+// CLIENT_ORIGIN is a comma-separated list of production frontend URLs
+// e.g. "https://red-thread-kappa.vercel.app"
+// Both sets are merged so the same backend works in every environment.
+const allowedOrigins = [
+  'http://localhost:3000',
+  ...( process.env.CLIENT_ORIGIN
+    ? process.env.CLIENT_ORIGIN.split(',').map((o) => o.trim())
+    : []
+  ),
+];
+
+console.log('Allowed CORS origins:', allowedOrigins);
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin) return callback(null, true); // allow non-browser clients
+      // Allow server-to-server / curl requests (no Origin header)
+      if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
+      console.warn(`CORS blocked: ${origin}`);
       callback(new Error(`CORS: origin '${origin}' is not allowed`));
     },
-    credentials: true, // allow cookies across origins
+    credentials: true, // required for httpOnly cookie to be sent cross-origin
   })
 );
 

@@ -74,10 +74,12 @@ const login = asyncHandler(async (req, res, next) => {
 // @route   POST /api/auth/logout
 // @access  Public (no auth required to clear the cookie)
 const logout = (_req, res) => {
+  // Options must exactly mirror COOKIE_OPTIONS (minus maxAge) so the
+  // browser recognises this as the same cookie and removes it.
   res.clearCookie('redthread_token', {
     httpOnly: true,
     secure:   IS_PROD,
-    sameSite: 'strict',
+    sameSite: IS_PROD ? 'none' : 'lax',
   });
   res.json({ success: true, message: 'Logged out successfully' });
 };
