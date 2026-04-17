@@ -1,280 +1,165 @@
-# 🔴 RedThread
+# RedThread
 
-> **Connect the dots. Map the conspiracy.**
+> Connect the dots. Map the conspiracy.
 
-RedThread is a full-stack conspiracy-board application where you create nodes of information and draw typed "red threads" between them — visualized as an interactive force-directed graph.
-
----
-
-## ✨ Features
-
-| Feature | Details |
-|---|---|
-| 🕸️ **Force-directed graph** | D3.js powered graph with zoom, pan, click-to-focus, and node side panel |
-| 🔐 **JWT Auth** | httpOnly cookie-based authentication — XSS-resistant |
-| 🗂️ **Conspiracy Nodes** | Create, edit, delete nodes with title, description, and tags |
-| 🧵 **Red Threads** | Connect nodes with typed relationships: `influence`, `similarity`, or `cause` |
-| 🎨 **Smooth Animations** | Framer Motion page transitions, sidebar slide-in, card hover effects |
-| 🔒 **Hardened API** | Helmet, rate limiting, NoSQL injection prevention, field whitelisting |
-| 📱 **Responsive UI** | Cards view + Graph view with toggle on the dashboard |
+RedThread is a full-stack web application designed to manage and visualize non-linear information. Users can create nodes of information and draw typed threads between them, exploring complex relationships through an interactive force-directed graph.
 
 ---
 
-## 🛠️ Tech Stack
+## Architecture and Tech Stack
 
-| Layer | Technology |
-|---|---|
-| **Frontend** | Next.js 16 (App Router), Tailwind CSS, Framer Motion, D3.js |
-| **Backend** | Node.js, Express.js, Mongoose |
-| **Database** | MongoDB (Atlas in production) |
-| **Auth** | JWT stored in httpOnly cookie |
-| **Security** | Helmet, express-rate-limit, express-mongo-sanitize |
+The application is built on a modern JavaScript stack, divided into a React frontend and a Node.js backend.
 
----
+### Frontend
+- **Next.js (App Router):** Handles routing, layout management, and serving the React application.
+- **Tailwind CSS:** Provides a utility-first design system for a responsive, minimalistic UI.
+- **D3.js:** Powers the core visual feature: an interactive, force-directed graph. It calculates the physics of nodes (repulsion) and threads (attraction) to naturally organize data.
+- **Framer Motion:** Enhances the user experience with smooth page transitions and sidebar animations without heavy performance overhead.
 
-## 📁 Project Structure
+### Backend
+- **Node.js & Express.js:** Provides a stateless REST API to handle business logic, data validation, and graph state persistence.
+- **MongoDB (Mongoose):** A NoSQL database chosen for its flexible document schema. It natively supports graph-like relationships by storing node references within thread documents.
 
-```
-RED_THREAD/
-├── backend/                  # Express.js API
-│   ├── src/
-│   │   ├── config/db.js      # MongoDB connection
-│   │   ├── controllers/      # Route handlers
-│   │   ├── middleware/        # Auth, validation, error handling
-│   │   ├── models/           # Mongoose schemas
-│   │   ├── routes/           # API routes
-│   │   └── index.js          # App entry point
-│   ├── seed.js               # Database seeder
-│   └── .env.example          # Environment variable template
-│
-└── frontend/                 # Next.js application
-    └── src/
-        ├── app/              # App Router pages
-        │   ├── (auth)/       # Login & Signup
-        │   ├── dashboard/    # Main board (cards + graph)
-        │   ├── nodes/        # Node CRUD pages
-        │   └── threads/      # Thread creation
-        ├── components/       # GraphView, NodeCard, Navbar, etc.
-        └── lib/              # API client, auth helpers
-```
+### Security
+- **Authentication:** Uses JSON Web Tokens (JWT) stored exclusively in `httpOnly` cookies to prevent XSS-based token theft.
+- **API Hardening:** Employs `helmet` for secure HTTP headers, `express-rate-limit` to block brute-force attacks, and `express-mongo-sanitize` to strip malicious NoSQL injection attempts.
 
 ---
 
-## 🚀 Getting Started (Local Development)
+## Core Features
+
+- **Force-Directed Visualization:** Navigate data visually. The D3.js graph supports zooming, panning, and click-to-focus interactions, dynamically pulling connected nodes into view.
+- **Node Management:** Create, edit, and delete discrete pieces of information (nodes) using standard CRUD operations. Each node supports a title, description, and searchable tags.
+- **Typed Relationships:** Connect two nodes using threads categorized by type (e.g., influence, similarity, or cause) to establish context between data points.
+- **Owner-Based Authorization:** Strict backend checks ensure users can only modify or delete nodes and threads they explicitly created.
+- **Cascade Deletion:** Deleting a node automatically triggers the database to remove all connected threads, ensuring graph integrity and preventing orphaned data.
+
+---
+
+## Getting Started (Local Development)
 
 ### Prerequisites
+- Node.js >= 18
+- MongoDB (local or Atlas)
+- npm >= 9
 
-- **Node.js** ≥ 18
-- **MongoDB** — either local or [MongoDB Atlas](https://cloud.mongodb.com) (free tier works)
-- **npm** ≥ 9
-
----
-
-### Step 1 — Clone the repository
-
+### 1. Clone the repository
 ```bash
 git clone https://github.com/pauljoe2k/RED_THREAD.git
 cd RED_THREAD
 ```
 
----
-
-### Step 2 — Configure the backend
-
+### 2. Configure the Backend
 ```bash
 cd backend
 cp .env.example .env
 ```
-
-Open `.env` and fill in your values:
-
+Open `.env` and fill in your values. Never commit `.env` files containing real secrets.
 ```env
 PORT=5000
 MONGO_URI=mongodb://localhost:27017/redthread
-# OR use Atlas:
-# MONGO_URI=mongodb+srv://<user>:<pass>@cluster0.xxx.mongodb.net/redthread?retryWrites=true&w=majority
-
 JWT_SECRET=your_super_secret_key_change_this
 JWT_EXPIRES_IN=7d
 CLIENT_ORIGIN=http://localhost:3000
 NODE_ENV=development
 ```
 
-> **Generate a strong JWT secret:**
-> ```bash
-> node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
-> ```
-
----
-
-### Step 3 — Configure the frontend
-
+### 3. Configure the Frontend
 ```bash
 cd ../frontend
 cp .env.local.example .env.local
 ```
-
-`.env.local` should contain:
-
+Update `.env.local`:
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:5000/api
 ```
 
----
-
-### Step 4 — Install dependencies
-
+### 4. Install Dependencies
 ```bash
-# Backend
 cd backend && npm install
-
-# Frontend
 cd ../frontend && npm install
 ```
 
----
+### 5. Seed the Database (Development Only)
+The seeder populates the database with test users and interconnected conspiracy nodes to bootstrap the local graph.
 
-### Step 5 — Seed the database (optional but recommended)
-
-The seeder creates **2 users** and **10 interconnected conspiracy nodes** so the graph is populated on first launch.
+> Development seed data only — no default credentials exposed. The seeder creates isolated test accounts. It must never be executed in production environments. Ensure database seeding scripts are disabled in your deployment pipelines.
 
 ```bash
 cd backend
 npm run seed
 ```
 
-**Seeded accounts:**
+### 6. Run the Application
+Open two terminals to start the servers:
 
-| Username | Email | Password |
-|---|---|---|
-| `admin` | `admin@test.com` | `password123` |
-| `researcher` | `res@test.com` | `password123` |
-
-To clear the database and re-seed:
-```bash
-npm run seed:clear
-```
-
----
-
-### Step 6 — Run the application
-
-Open **two terminals**:
-
-**Terminal 1 — Backend**
+Backend:
 ```bash
 cd backend
 npm run dev
-# → API running at http://localhost:5000
 ```
 
-**Terminal 2 — Frontend**
+Frontend:
 ```bash
 cd frontend
 npm run dev
-# → App running at http://localhost:3000
 ```
-
-Open **http://localhost:3000** in your browser.
+Navigate to `http://localhost:3000`.
 
 ---
 
-## 🗺️ Application Walkthrough
-
-```
-/ → redirects based on auth status
-  → /login      Sign in to your account
-  → /signup     Create a new account
-  → /dashboard  Your conspiracy board
-       ├── Cards view: browse all nodes as cards
-       └── Graph view: interactive force-directed graph
-            ├── Hover node   → highlights connections
-            ├── Click node   → opens side panel with details
-            └── Click space  → resets focus
-  → /nodes/new       Create a new conspiracy node
-  → /nodes/:id       View node details + connected threads
-  → /nodes/:id/edit  Edit a node (owner only)
-  → /threads/new     Draw a red thread between two nodes
-```
-
----
-
-## 🔌 API Endpoints
+## API Endpoints
 
 All routes (except auth) require the JWT cookie set on login.
 
 ### Auth
-| Method | Route | Description |
-|---|---|---|
-| `POST` | `/api/auth/register` | Create account |
-| `POST` | `/api/auth/login` | Log in (sets httpOnly cookie) |
-| `POST` | `/api/auth/logout` | Log out (clears cookie) |
-| `GET` | `/api/auth/me` | Get current user |
+- `POST /api/auth/register` : Create account
+- `POST /api/auth/login` : Log in (sets httpOnly cookie)
+- `POST /api/auth/logout` : Log out (clears cookie)
+- `GET /api/auth/me` : Get current user
 
 ### Nodes
-| Method | Route | Description |
-|---|---|---|
-| `GET` | `/api/nodes` | Get all nodes (paginated) |
-| `POST` | `/api/nodes` | Create a node |
-| `GET` | `/api/nodes/:id` | Get single node |
-| `PUT` | `/api/nodes/:id` | Update node (owner only) |
-| `DELETE` | `/api/nodes/:id` | Delete node + cascade threads |
+- `GET /api/nodes` : Get all nodes (paginated)
+- `POST /api/nodes` : Create a node
+- `GET /api/nodes/:id` : Get single node
+- `PUT /api/nodes/:id` : Update node (owner only)
+- `DELETE /api/nodes/:id` : Delete node and cascade threads
 
 ### Threads
-| Method | Route | Description |
-|---|---|---|
-| `GET` | `/api/threads` | Get all threads (paginated) |
-| `POST` | `/api/threads` | Create a thread |
-| `GET` | `/api/threads/:id` | Get single thread |
-| `PUT` | `/api/threads/:id` | Update thread (owner only) |
-| `DELETE` | `/api/threads/:id` | Delete thread |
-| `GET` | `/api/threads/node/:nodeId` | Get threads for a node |
+- `GET /api/threads` : Get all threads (paginated)
+- `POST /api/threads` : Create a thread
+- `GET /api/threads/:id` : Get single thread
+- `PUT /api/threads/:id` : Update thread (owner only)
+- `DELETE /api/threads/:id` : Delete thread
+- `GET /api/threads/node/:nodeId` : Get threads for a specific node
 
 ---
 
-## 🔒 Security Features
+## Production Security Notes
 
-- **httpOnly JWT cookie** — the token is never accessible via JavaScript
-- **Helmet** — secure HTTP headers (CSP, HSTS, X-Frame-Options, etc.)
-- **Rate limiting** — 100 req/15min globally; 10 req/15min on auth endpoints
-- **NoSQL injection prevention** — `express-mongo-sanitize` strips `$` and `.` from input
-- **Input validation** — `express-validator` enforces types, lengths, and field whitelisting on every route
-- **Cascade delete** — deleting a node automatically removes all connected threads
-- **Owner-only mutations** — only the creator can update or delete their nodes/threads
+When migrating from development to production, strictly adhere to the following baseline:
 
----
-
-## 🌐 Production Deployment
-
-See the full deployment guides:
-
-- **Backend on Render:** [`backend/DEPLOYMENT.md`](./backend/DEPLOYMENT.md)
-- **Frontend on Vercel:** [`frontend/DEPLOYMENT.md`](./frontend/DEPLOYMENT.md)
-
-**Quick summary:**
-1. Deploy backend to Render — set `MONGO_URI`, `JWT_SECRET`, `CLIENT_ORIGIN`, `NODE_ENV=production`
-2. Deploy frontend to Vercel — set `NEXT_PUBLIC_API_URL=https://your-render-app.onrender.com/api`
-3. Update `CLIENT_ORIGIN` on Render to your Vercel domain
+- **Never commit `.env` files**: Ensure `.env` is explicitly ignored in source control.
+- **Use strong secrets (>= 64 bytes)**: Generate cryptographically secure `JWT_SECRET` keys and rotate them periodically.
+- **Enable secure, `httpOnly` cookies**: Mandate `secure: true` for session cookies to enforce HTTPS-only transmission in production.
+- **Restrict DB/network access**: Use IP allowlisting (e.g., in MongoDB Atlas) to restrict database access exclusively to your application server IPs.
+- **Apply rate limiting and input validation consistently**: Ensure all exposed endpoints maintain strict validation schemas and rate limits to prevent volumetric abuse.
 
 ---
 
-## 🧪 Testing the API manually
+## Production Deployment
 
-```bash
-# Health check
-curl http://localhost:5000/api/health
+Deployment guides are available in their respective directories:
+- Backend: `backend/DEPLOYMENT.md`
+- Frontend: `frontend/DEPLOYMENT.md`
 
-# Login (returns httpOnly cookie)
-curl -c cookies.txt -X POST http://localhost:5000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@test.com","password":"password123"}'
-
-# Get all nodes (send cookie)
-curl -b cookies.txt http://localhost:5000/api/nodes
-```
+Quick summary:
+1. Deploy backend to Render, setting production environment variables.
+2. Deploy frontend to Vercel, pointing `NEXT_PUBLIC_API_URL` to the Render URL.
+3. Update `CLIENT_ORIGIN` on the backend to match your Vercel domain to configure CORS securely.
 
 ---
 
-## 📄 License
+## License
 
-MIT — feel free to use, modify, and distribute.
+MIT License.
